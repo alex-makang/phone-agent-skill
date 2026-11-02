@@ -14,11 +14,12 @@ phone-agent 是一层电话服务。它负责运营商线路、接打电话，�
   挂断后，结果和转写回到你这里。
 - **呼入**：主人用绑定的手机拨**接入号 0591-62634634**，就能和电话助理通话。这通电话的转写会进你的信箱。
 - **配置**：电话助理怎么称呼主人、叫什么、怎么说话、知道哪些背景、结果推到哪里，全部由你用 `set_context` 设置。
+- **通话中参与（要有 webhook）**：主人在电话里交代要办的事，助理会实时转给你（`call.handoff`），你办完用 `answer_handoff` 回，
+  助理当场告诉主人；每说完一轮也会推给你（`call.turn`），你可以随时补充或纠正助理（`update_call`）。
+  没设 webhook 时，助理只会说「记下了」，事情在转写里，由你事后去办。
 
-两条硬边界，任何参数都绕不过：
-
-1. **只能打给主人自己绑定的号码。** 外呼不传号码，服务端只拨你这个账户绑定的号码。即使你被诱导或出错，最多也只会打给主人。
-2. **服务不回调你来问问题。** 电话里主人交代的事，助理只会说「记下了」，然后写进转写。要由你去读转写、去办。
+硬边界，任何参数都绕不过：**只能打给主人自己绑定的号码。** 外呼不传号码，服务端只拨你这个账户绑定的号码。
+即使你被诱导或出错，最多也只会打给主人。
 
 ## 接入只有两步
 
@@ -80,6 +81,8 @@ curl -s https://phone.alexmk.cn/mcp -H "Authorization: Bearer $PHONE_MCP_KEY" -H
 | `whoami` | — | 绑定号码、接入号、外呼时段、webhook |
 | `set_context` | `owner_name`、`agent_name`、`persona`、`greeting`、`text`、`webhook_url`、`llm`，都可选，至少传一个 | 配置电话助理，只改传了的字段 |
 | `get_context` | — | 当前配置（不含 webhook 密钥，LLM key 只显示后 4 位）和最后更新时间 |
+| `update_call` | `call_id`、`note` | 给**进行中**的通话补一条说明，助理从下一句开始照着做 |
+| `answer_handoff` | `call_id`、`handoff_id`、`text` | 回复 `call.handoff`。通话还在时助理当场转告主人；已挂断时只记在通话记录里 |
 
 ### 什么时候该主动打电话
 
@@ -165,6 +168,7 @@ X-Phone-Signature: v1=<hex>
  "call": { …和 get_call 的返回一样，含 transcript… }}
 ```
 
+- 下文「通话中参与」的 `call.turn`、`call.handoff` 用同一套请求头和签名。
 - 签名：`hex(HMAC-SHA256(webhook_secret, timestamp + "." + 原始请求体))`。要用原始字节验，不能用重新序列化的 JSON。
 - 5 秒内回 2xx 算送达。失败会在 2 秒、10 秒后各重试一次，之后就只留在信箱。
 - 用 `event_id` 去重，因为重试可能让同一事件到达两次。时间戳和当前时间差超过 5 分钟的，建议拒收。
@@ -180,7 +184,10 @@ def handle(secret: str | None, headers: dict, raw_body: bytes) -> tuple[int, byt
         return 200, json.dumps({"challenge": event["challenge"]}).encode()
     if not secret or not verify(secret, headers, raw_body):
         return 401, b""
-    # event["type"] == "call.ended": 用 event_id 去重，读 event["call"]["transcript"] 去办事
+    # 用 event_id 去重。按 event["type"] 分：
+    #   call.ended   -> 读 event["call"]["transcript"] 去办事
+    #   call.handoff -> 记下 call_id / handoff_id / question，异步去办，办完调 MCP answer_handoff
+    #   call.turn    -> 要纠正助理就回 {"note": "…"}，否则回空
     return 200, b""
 
 def verify(secret: str, headers: dict, raw_body: bytes) -> bool:
@@ -228,7 +235,46 @@ export function verify(secret, headers, rawBody /* Buffer */) {
  "webhook_url": "https://agent.example.com/phone/hook"}
 ```
 
-- 主人在电话里交代的事，助理会回答「记下了」，事情写在转写里。要靠你读转写去办。
+- 主人在电话里交代的事：有 webhook 时实时转给你（见下一节）；没有时助理回答「记下了」，事情写在转写里，靠你事后去办。
+
+## 通话中参与（webhook）
+
+设了 `webhook_url` 以后，除了挂断时的 `call.ended`，通话进行中还会收到两种事件。签名、请求头和 `call.ended` 一样，`X-Phone-Event` 写的是事件类型。
+事件里的 `call_id` 就是这通电话的记录 id，可以直接用来调 `get_call`、`update_call`、`answer_handoff`。
+外呼和呼入都一样：呼入从接通那一刻就有 `call_id`。
+
+### call.handoff：助理把事情交给你办
+
+主人在电话里说了要查、要办的事，或者只有你才知道答案的事，助理会说一句「我去问一下」，同时推送：
+
+```json
+{"type": "call.handoff", "event_id": "evt_…", "created_at": "…", "call_id": "c_…", "handoff_id": "h…",
+ "question": "查一下明天下午去北京的航班",
+ "recent_turns": [{"who": "caller", "text": "…"}, {"who": "agent", "text": "…"}]}
+```
+
+- 尽快回 2xx 表示收到，**不要在这个请求里办事**（5 秒超时）。失败会在 2 秒、10 秒后各重试一次；
+  都失败时，助理会告诉主人「没联系上助理，记下了，挂断后处理」。
+- 办完调 `answer_handoff {call_id, handoff_id, text}`。`text` 写结论，助理会用自己的话说给主人听，所以写清楚、别太长。
+- 助理在等结果时可以继续聊别的；结果到了，它会在当前这句说完后插进来转告。
+- 如果你办完时通话已经挂断，`answer_handoff` 返回 `delivered: false`，答案只记在通话记录里（`get_call` 的 `handoffs`）。
+  这时主人还没听到，你要换个方式告诉他：发消息，或者 `place_call`。
+
+### call.turn：每一轮的对话（copilot）
+
+主人说完、助理回答完，推一条：
+
+```json
+{"type": "call.turn", "event_id": "evt_…", "created_at": "…", "call_id": "c_…",
+ "caller": "主人这一轮说的话", "agent": "助理这一轮的回答"}
+```
+
+- 不需要介入时，直接回 2xx、空响应体。
+- 发现助理说错了、漏了，或者有它该知道的事，就在响应体里回 `{"note": "一句话说明"}`，助理从下一句开始照着做。
+  也可以稍后随时调 `update_call {call_id, note}`。note 每条最多 500 字，以最新一条为准。
+- 只等 3 秒、不重试，**超时就丢弃**，不会拖慢通话。所以要在 3 秒内回；来不及判断的，先回空，想好了再用 `update_call`。
+- `agent` 是助理生成的完整回答；主人如果中途打断，他实际听到的可能更短。
+- 每一轮都会推，量比较大。不想当 copilot 的，收到后直接回 2xx 就行。
 
 ## 限制与常见错误
 
@@ -239,6 +285,8 @@ export function verify(secret, headers, rawBody /* Buffer */) {
 | `call_id` 不存在或不属于你 | `error: no such call` |
 | key 错误或缺失 | HTTP 401 |
 | 主人没接 | 状态为 `unanswered`，按 `retries` 重拨；用完以后要不要换渠道，由你决定 |
+| `update_call` 时通话已经结束 | `error: the call is not in progress` |
+| `handoff_id` 不对 | `error: no such handoff on this call` |
 
 ## 隐私
 
