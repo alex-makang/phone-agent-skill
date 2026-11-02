@@ -105,6 +105,26 @@ curl -s https://phone.alexmk.cn/mcp -H "Authorization: Bearer $PHONE_MCP_KEY" -H
 
 **webhook（可选，用 `set_context` 设 `webhook_url`）**：外呼或呼入一结束就推送一次。
 
+**先过测试才算设置成功。** 调 `set_context` 设 `webhook_url` 时，服务端会先往这个地址发一条测试事件：
+
+```
+POST <你的 URL>
+X-Phone-Event: webhook.test
+X-Phone-Timestamp: …
+X-Phone-Signature: v1=…
+
+{"type": "webhook.test", "event_id": "evt_…", "created_at": "…", "challenge": "Xk3…"}
+```
+
+你的接口要在 **5 秒内回 2xx**，并且**响应体里原样带回 `challenge`**，例如 `{"challenge": "Xk3…"}`。
+这时你还没拿到签名密钥，所以测试事件不用验签。
+测试不通过时，`set_context` 返回 `error: webhook test failed …; nothing was changed`，这次调用的**所有字段都不生效**。
+测试通过后，返回里会带 `webhook_secret`，只给这一次。之后的 `call.ended` 都用它签名。
+
+所以接入顺序是：先把接口部署好（能回 challenge），再调 `set_context`。拿到密钥后存好，之后的事件都要验签。
+
+事件格式：
+
 ```
 POST <你的 URL>
 Content-Type: application/json
@@ -120,10 +140,19 @@ X-Phone-Signature: v1=<hex>
 - 5 秒内回 2xx 算送达。失败会在 2 秒、10 秒后各重试一次，之后就只留在信箱。
 - 用 `event_id` 去重，因为重试可能让同一事件到达两次。时间戳和当前时间差超过 5 分钟的，建议拒收。
 
-Python：
+Python（含测试事件的处理）：
 
 ```python
-import hashlib, hmac, time
+import hashlib, hmac, json, time
+
+def handle(secret: str | None, headers: dict, raw_body: bytes) -> tuple[int, bytes]:
+    event = json.loads(raw_body)
+    if event.get("type") == "webhook.test":
+        return 200, json.dumps({"challenge": event["challenge"]}).encode()
+    if not secret or not verify(secret, headers, raw_body):
+        return 401, b""
+    # event["type"] == "call.ended": 用 event_id 去重，读 event["call"]["transcript"] 去办事
+    return 200, b""
 
 def verify(secret: str, headers: dict, raw_body: bytes) -> bool:
     ts = headers["X-Phone-Timestamp"]
@@ -133,7 +162,7 @@ def verify(secret: str, headers: dict, raw_body: bytes) -> bool:
     return hmac.compare_digest(expected, headers["X-Phone-Signature"])
 ```
 
-Node：
+Node（测试事件同样处理：`type === 'webhook.test'` 时回 `{"challenge": event.challenge}`）：
 
 ```js
 import crypto from 'node:crypto';
@@ -159,7 +188,7 @@ export function verify(secret, headers, rawBody /* Buffer */) {
 | `persona` | 2000 字 | 说话风格和行为，例如「说话干脆，不客套」 |
 | `greeting` | 100 字 | 主人打进来时的第一句，默认「你好，我是<agent_name>。」。外呼的开场固定是「喂，<owner_name>，我是<agent_name>。」 |
 | `text` | 4000 字 | 常驻背景：主人是谁、偏好、这几天的安排和在忙的事、电话里遇到某类事怎么应对。**每次传都是整段替换**，有变化（比如每天早上）就重写 |
-| `webhook_url` | — | 接收 `call.ended` 的 http(s) 地址。**每次设置都会生成新的签名密钥，在返回的 `webhook_secret` 里只给这一次**，请立刻存好；丢了就再设一次（旧密钥随即失效） |
+| `webhook_url` | — | 接收 `call.ended` 的 http(s) 地址。**先过测试（回带 challenge）才生效**，见上文。通过后生成新的签名密钥，在返回的 `webhook_secret` 里只给这一次，请立刻存好；丢了就再设一次（会重新测试，旧密钥随即失效） |
 | `llm` | — | 用你自己的模型代替我们的：`{"url": "https://…/chat/completions", "api_key": "…", "model": "…", "params": {…}}`，要求 OpenAI 兼容、支持流式。不设就用我们的 |
 
 第一次配置的例子：
