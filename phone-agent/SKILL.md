@@ -14,6 +14,7 @@ phone-agent 是一层电话服务。它负责运营商线路、接打电话，�
   挂断后，结果和转写回到你这里。
 - **呼入**：主人用绑定的手机拨**接入号 0591-62634634**，就能和电话助理通话。这通电话的转写会进你的信箱。
 - **配置**：电话助理怎么称呼主人、叫什么、怎么说话、知道哪些背景、结果推到哪里，全部由你用 `set_context` 设置。
+- **联网搜索**：电话里问天气、新闻、股价这类公开的实时信息，助理会自己联网搜索后回答，不用你管。
 - **通话中参与（要有 webhook）**：主人在电话里交代要办的事，助理会实时转给你（`call.handoff`），你办完用 `answer_handoff` 回，
   助理当场告诉主人；每说完一轮也会推给你（`call.turn`），你可以随时补充或纠正助理（`update_call`）。
   没设 webhook 时，助理只会说「记下了」，事情在转写里，由你事后去办。
@@ -82,7 +83,7 @@ curl -s https://phone.alexmk.cn/mcp -H "Authorization: Bearer $PHONE_MCP_KEY" -H
 | `set_context` | `owner_name`、`agent_name`、`persona`、`greeting`、`text`、`webhook_url`、`llm`，都可选，至少传一个 | 配置电话助理，只改传了的字段 |
 | `get_context` | — | 当前配置（不含 webhook 密钥，LLM key 只显示后 4 位）和最后更新时间 |
 | `update_call` | `call_id`、`note` | 给**进行中**的通话补一条说明，助理从下一句开始照着做 |
-| `answer_handoff` | `call_id`、`handoff_id`、`text` | 回复 `call.handoff`。通话还在时助理当场转告主人；已挂断时只记在通话记录里 |
+| `answer_handoff` | `call_id`、`handoff_id`、`text` | 回复 `call.handoff`。通话还在时助理当场转告主人；已挂断时下次接通先说 |
 
 ### 什么时候该主动打电话
 
@@ -257,8 +258,8 @@ export function verify(secret, headers, rawBody /* Buffer */) {
   都失败时，助理会告诉主人「没联系上助理，记下了，挂断后处理」。
 - 办完调 `answer_handoff {call_id, handoff_id, text}`。`text` 写结论，助理会用自己的话说给主人听，所以写清楚、别太长。
 - 助理在等结果时可以继续聊别的；结果到了，它会在当前这句说完后插进来转告。
-- 如果你办完时通话已经挂断，`answer_handoff` 返回 `delivered: false`，答案只记在通话记录里（`get_call` 的 `handoffs`）。
-  这时主人还没听到，你要换个方式告诉他：发消息，或者 `place_call`。
+- 如果你办完时通话已经挂断，`answer_handoff` 返回 `delivered: "next_call"`：答案记在通话记录里（`get_call` 的 `handoffs`），
+  主人**下一次**接通电话（打进来或你打过去）时，助理会先告诉他。等不到下次的，另外发消息或 `place_call`。
 
 ### call.turn：每一轮的对话（copilot）
 
