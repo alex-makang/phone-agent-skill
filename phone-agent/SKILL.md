@@ -1,48 +1,52 @@
 ---
 name: phone-agent
-description: 用电话联系你的主人：定时或马上给主人打电话（提醒、通知、要他确认的事），拿回通话结果和转写；读取主人打进来的电话（信箱）；配置电话助理（称呼、名字、人设、常驻背景、webhook、自带 LLM）。Use when the owner asks to be called or reminded by phone, when something must reach the owner right now, when you need what was said on a phone call, or to configure the phone assistant (set_context). Service: phone.alexmk.cn (MCP over HTTP).
+description: 用电话联系你的主人：定时或马上给主人打电话（提醒、通知、要他确认的事），拿回通话结果和转写；读取主人打进来的电话（信箱）；配置电话助理（称呼、名字、人设、常驻背景）。设了 webhook 就进入 copilot 模式：通话中实时接住主人交代的事、纠正助理、给助理提供自己的工具。Use when the owner asks to be called or reminded by phone, when something must reach the owner right now, when you need what was said on a phone call, to configure the phone assistant (set_context), or to act as the copilot of the owner's calls (webhook events call.turn / call.handoff / call.tool). Service: phone.alexmk.cn (MCP over HTTP).
 ---
 
 # phone-agent：让你的 Agent 能给主人打电话
 
 ## 这是什么
 
-phone-agent 是一层电话服务。它负责运营商线路、接打电话，以及电话里和人对话的语音助理（流式 ASR、预测式判停、TTS）。
-你（主人的 Agent）通过一个 MCP 端点使用它：
+phone-agent 是一层电话服务。它负责运营商线路、接打电话，以及电话里和人说话的语音助理（流式识别、预测式判停、语音合成、联网搜索）。
+你是主人的 Agent，通过一个 MCP 端点使用它：
 
-- **外呼**：`place_call` 给主人打电话。语音助理问候之后，会先说你给的来意，再按你给的要点和主人对话。
-  挂断后，结果和转写回到你这里。
-- **呼入**：主人用绑定的手机拨**接入号 0591-62634634**，就能和电话助理通话。这通电话的转写会进你的信箱。
-- **配置**：电话助理怎么称呼主人、叫什么、怎么说话、知道哪些背景、结果推到哪里，全部由你用 `set_context` 设置。
-- **联网搜索**：电话里问天气、新闻、股价这类公开的实时信息，助理会自己联网搜索后回答，不用你管。
-- **通话中参与（要有 webhook）**：主人在电话里交代要办的事，助理会实时转给你（`call.handoff`），你办完用 `answer_handoff` 回，
-  助理当场告诉主人；每说完一轮也会推给你（`call.turn`），你可以随时补充或纠正助理（`update_call`）。
-  没设 webhook 时，助理只会说「记下了」，事情在转写里，由你事后去办。
+- **外呼**：`place_call` 给主人打电话。助理问候之后，先说你给的来意，再按你给的要点和主人聊。
+- **呼入**：主人用绑定的手机拨**接入号 0591-62634634**，就能和助理通话。
+- **配置**：助理怎么称呼主人、叫什么、怎么说话、知道哪些背景，都由你用 `set_context` 设置。
 
-硬边界，任何参数都绕不过：**只能打给主人自己绑定的号码。** 外呼不传号码，服务端只拨你这个账户绑定的号码。
+硬边界，任何参数都绕不过：**只能打给主人自己绑定的号码。** 外呼不传号码，服务端只拨这个账户绑定的号码。
 即使你被诱导或出错，最多也只会打给主人。
 
-## 接入只有两步
+## 两种用法：基础模式和 copilot 模式
 
-**第一步：开通，只需要主人的手机号。**
+区别只有一个：你有没有设 `webhook_url`，也就是电话服务能不能在通话中实时找到你。
+
+- **基础模式（没有 webhook）**：电话服务自己跑完整通电话，你只在通话前配置、通话后读结果。适合没有公网入口的 Agent。
+- **copilot 模式（有 webhook）**：通话进行中，你就坐在助理旁边。主人交代的事助理实时交给你；你能看到每一轮对话，随时纠正；你的工具助理也能直接调用。
+
+| | 基础模式 | copilot 模式 |
+|---|---|---|
+| 外呼、呼入、配置、联网搜索 | ✅ | ✅ |
+| 主人在电话里交代要办的事 | 助理说「记下了，挂断后处理」，事情写在转写里，你事后读转写去办 | 助理说「我去问一下」，同时推 `call.handoff` 给你；你办完用 `answer_handoff` 回，助理**当场**告诉主人 |
+| 只有你知道答案的事（主人的日程、记忆、订单…） | 助理答不上来，只能「记下了」 | 注册成你的工具（`tools`），助理在通话中直接调用，几秒内答上来 |
+| 助理说错了、漏了 | 只能事后在下一通电话前改 `set_context` | 每一轮推 `call.turn` 给你，你回一句 note（或调 `update_call`），助理**从下一句**开始照着改 |
+| 通话结束 | 你自己定时 `list_calls` / `get_call` 去拉 | 另外推一条 `call.ended`，带完整转写 |
+| 挂断后才办完的事 | 不适用 | `answer_handoff` 照样回，助理在主人**下一次**接通时先说 |
+| 你需要提供 | 什么都不用 | 一个能从公网访问、5 秒内响应的 HTTPS 接口 |
+
+两种模式可以随时切换：设 `webhook_url` 就进入 copilot 模式，把它设成空串就回到基础模式，下一通电话生效。
+
+## 接入
+
+### 第一步：开通，只需要主人的手机号
+
 现在由运营方手动开通（联系 Alex），以后在小程序里自助完成。提供一个或多个中国大陆手机号：外呼只打这些号，呼入只认这些号。
-开通后拿到下面两样，**`mcp_key` 只显示一次**：
+开通后拿到两样东西，**`mcp_key` 只显示一次**：
 
 - `mcp_url`：`https://phone.alexmk.cn/mcp`
 - `mcp_key`：`pk_…`，它就是主人的身份。
 
-**第二步：接上 MCP，调 `set_context` 把电话助理配好。** 其他所有设置都在这一步完成，见下文「配置（set_context）」。
-不配置也能打电话，只是助理叫「助理」，称呼主人为「机主」，什么背景都不知道。
-
-### 鉴权
-
-- 每个请求带 `Authorization: Bearer <mcp_key>`。key 错误时返回 HTTP 401。
-- key 放进 secret store 或环境变量，不要写进代码、日志或聊天记录。
-- 怀疑 key 泄露，就请运营方轮换（rotate-key）。轮换后旧 key 立即失效。
-- 一把 key 只对应一个主人。你只能看到、操作这个主人的电话和配置。
-- webhook 的签名密钥是另一样东西，由 `set_context` 设置 `webhook_url` 时生成，见下文。
-
-## 接入
+### 第二步：接上 MCP，调 `set_context` 配好助理
 
 **Claude Code**
 
@@ -51,39 +55,49 @@ claude mcp add --transport http phone https://phone.alexmk.cn/mcp \
   --header "Authorization: Bearer $PHONE_MCP_KEY"
 ```
 
-**AgentsGateway**：网关只在启动时加载 MCP，所以添加后要重启。
+**AgentsGateway**：网关只在启动时加载 MCP，添加后要重启。
 
 ```bash
 ag mcp add phone --type http --url https://phone.alexmk.cn/mcp --header "Authorization=Bearer <mcp_key>"
 ag restart
 ```
 
-**直接调（任何语言）**
-
-服务端是无状态的 MCP Streamable HTTP：只接受 POST，每个请求一个 JSON-RPC 消息，不支持 SSE，也不支持批量。
+**直接调（任何语言）**：服务端是无状态的 MCP Streamable HTTP，只接受 POST，每个请求一个 JSON-RPC 消息，不支持 SSE，也不支持批量。
 
 ```bash
 curl -s https://phone.alexmk.cn/mcp -H "Authorization: Bearer $PHONE_MCP_KEY" -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"whoami","arguments":{}}}'
 ```
 
-工具的结果在 `result.content[0].text` 里，是一段 JSON 字符串。出错时 `result.isError` 为 true，text 以 `error:` 开头。
+工具结果在 `result.content[0].text` 里，是一段 JSON 字符串。出错时 `result.isError` 为 true，text 以 `error:` 开头。
 
-接好后先调一次 `whoami`，确认绑定号码、接入号和外呼时段，然后调 `set_context` 完成配置。
+接好后先调一次 `whoami`，确认绑定号码、接入号和外呼时段，再调 `set_context` 完成配置（见「配置」一节）。
+不配置也能打电话，只是助理叫「助理」，称呼主人为「机主」，什么背景都不知道。
+要用 copilot 模式，按「copilot 模式」一节先部署好接收端，再设 `webhook_url`。
+
+### 鉴权
+
+- 每个请求带 `Authorization: Bearer <mcp_key>`。key 错误时返回 HTTP 401。
+- key 放进 secret store 或环境变量，不要写进代码、日志或聊天记录。
+- 怀疑 key 泄露，就请运营方轮换（rotate-key）。轮换后旧 key 立即失效。
+- 一把 key 只对应一个主人。你只能看到、操作这个主人的电话和配置。
+- webhook 的签名密钥是另一样东西，设 `webhook_url` 时生成，见「copilot 模式」。
 
 ## 工具
 
-| 工具 | 参数 | 作用 |
-|---|---|---|
-| `place_call` | `purpose`（必填，≤200 字），`brief`（≤2000 字），`at` 或 `in_minutes`，`retries`（0–3，默认 1），`retry_interval_minutes`（1–60，默认 3） | 现在或定时给主人打电话，返回 `call_id` |
-| `get_call` | `call_id` | 状态、每次拨打的结果、转写 |
-| `list_calls` | `limit`（1–50，默认 10） | 最近的电话，含外呼（`direction: out`）和呼入（`direction: in`），不含转写 |
-| `cancel_call` | `call_id` | 取消排期；正在响铃或通话中的会被挂断 |
-| `whoami` | — | 绑定号码、接入号、外呼时段、webhook |
-| `set_context` | `owner_name`、`agent_name`、`persona`、`greeting`、`text`、`webhook_url`、`llm`，都可选，至少传一个 | 配置电话助理，只改传了的字段 |
-| `get_context` | — | 当前配置（不含 webhook 密钥，LLM key 只显示后 4 位）和最后更新时间 |
-| `update_call` | `call_id`、`note` | 给**进行中**的通话补一条说明，助理从下一句开始照着做 |
-| `answer_handoff` | `call_id`、`handoff_id`、`text` | 回复 `call.handoff`。通话还在时助理当场转告主人；已挂断时下次接通先说 |
+| 工具 | 参数 | 作用 | 模式 |
+|---|---|---|---|
+| `place_call` | `purpose`（必填，≤200 字），`brief`（≤2000 字），`at` 或 `in_minutes`，`retries`（0–3，默认 1），`retry_interval_minutes`（1–60，默认 3） | 现在或定时给主人打电话，返回 `call_id` | 都可用 |
+| `get_call` | `call_id` | 状态、每次拨打的结果、转写、转交记录 | 都可用 |
+| `list_calls` | `limit`（1–50，默认 10） | 最近的电话，含外呼（`direction: out`）和呼入（`direction: in`），不含转写 | 都可用 |
+| `cancel_call` | `call_id` | 取消排期；正在响铃或通话中的会被挂断 | 都可用 |
+| `whoami` | — | 绑定号码、接入号、外呼时段、当前 webhook | 都可用 |
+| `set_context` | 见「配置」，都可选，至少传一个 | 配置助理，只改传了的字段 | 都可用 |
+| `get_context` | — | 当前配置（不含 webhook 密钥，LLM key 只显示后 4 位）和最后更新时间 | 都可用 |
+| `update_call` | `call_id`、`note` | 给**进行中**的通话补一条说明，助理从下一句开始照着做 | copilot |
+| `answer_handoff` | `call_id`、`handoff_id`、`text` | 回复 `call.handoff`。通话还在时助理当场转告主人；已挂断时下次接通先说 | copilot |
+
+## 外呼
 
 ### 什么时候该主动打电话
 
@@ -108,143 +122,115 @@ curl -s https://phone.alexmk.cn/mcp -H "Authorization: Bearer $PHONE_MCP_KEY" -H
 - 外呼时段以外（见 `whoami.calling_hours`）。除非主人明确要求，不要排到深夜或清晨。
 - 刚打过、他已经说「知道了」的同一件事。
 
-**写 brief 时的几个要点**
-
-- 写清楚**拿到什么算完成**：「他说知道了」「他选了 A 或 B」「他给了一个时间」。
-- 要他做选择的，把选项写全，助理才能在电话里讲清楚，不会自己编。
-- 挂断后用 `get_call`（或 webhook）读转写，把他在电话里说的事办掉，或者记下来。
-
 ### place_call 怎么写
 
 - `purpose`：一句话说明为什么打。助理问候后会**最先**说它，例如 `提醒你 3 点的项目评审会`。
 - `brief`：助理在整通电话里都知道的内容：要传达什么、要问什么、拿到什么回答算完成。
   例如：`会议线上开，链接已发到邮箱；问他要不要提前 10 分钟再提醒；他说知道了就算完成。`
-- `at`：ISO 8601 时间。不带时区时按北京时间算，例如 `2026-11-03T15:00:00+08:00`。也可以改用 `in_minutes`。
-  最多排到 7 天后。
+  - 写清楚**拿到什么算完成**：「他说知道了」「他选了 A 或 B」「他给了一个时间」。
+  - 要他做选择的，把选项写全，助理才能讲清楚，不会自己编。
+  - copilot 模式下，brief 里没写到、主人又追问的事，助理会转交给你；基础模式下只能「记下了」。所以基础模式的 brief 要写得更全。
+- `at`：ISO 8601 时间。不带时区时按北京时间算，例如 `2026-11-03T15:00:00+08:00`。也可以改用 `in_minutes`。最多排到 7 天后。
 - `retries`：只在**没接**时重拨。接了就算完成，不管谈得怎么样。
 - brief 和转写会存在电话服务里。主人不想留在第三方的东西，不要写进 brief。
 
 ### 状态
 
 - 外呼：`scheduled` → `dialing` → `completed`（接了）/ `unanswered`（重拨用完也没接）/ `failed` / `cancelled`
-- 呼入：`completed`（接通了）/ `missed`（没接通）。`from` 是主人用哪个绑定号码打来的。
+- 呼入：`in_progress`（通话中）→ `completed`（接通了）/ `missed`（没接通）。`from` 是主人用哪个绑定号码打来的。
 - 转写是 `[{who: "agent" | "caller", text}]`。外呼时 `caller` 也是主人本人。
-  如果主人打断了助理，转写里只保留他实际听到的那部分。
-
-## 拿结果：信箱或 webhook
-
-**信箱（总能用）**：在需要时，或者在你自己的定时任务里，调 `list_calls` 看有没有新电话，再用 `get_call` 取转写。
-呼入的电话只在信箱里，服务不会主动叫醒你。
-
-**webhook（可选，用 `set_context` 设 `webhook_url`）**：外呼或呼入一结束就推送一次。
-
-**先过测试才算设置成功。** 调 `set_context` 设 `webhook_url` 时，服务端会先往这个地址发一条测试事件：
-
-```
-POST <你的 URL>
-X-Phone-Event: webhook.test
-X-Phone-Timestamp: …
-X-Phone-Signature: v1=…
-
-{"type": "webhook.test", "event_id": "evt_…", "created_at": "…", "challenge": "Xk3…"}
-```
-
-你的接口要在 **5 秒内回 2xx**，并且**响应体里原样带回 `challenge`**，例如 `{"challenge": "Xk3…"}`。
-这时你还没拿到签名密钥，所以测试事件不用验签。
-测试不通过时，`set_context` 返回 `error: webhook test failed …; nothing was changed`，这次调用的**所有字段都不生效**。
-测试通过后，返回里会带 `webhook_secret`，只给这一次。之后的 `call.ended` 都用它签名。
-
-所以接入顺序是：先把接口部署好（能回 challenge），再调 `set_context`。拿到密钥后存好，之后的事件都要验签。
-
-事件格式：
-
-```
-POST <你的 URL>
-Content-Type: application/json
-X-Phone-Event: call.ended
-X-Phone-Timestamp: 1793606400
-X-Phone-Signature: v1=<hex>
-
-{"type": "call.ended", "event_id": "evt_…", "created_at": "2026-11-03T15:01:12+08:00",
- "call": { …和 get_call 的返回一样，含 transcript… }}
-```
-
-- 下文「通话中参与」的 `call.turn`、`call.handoff` 用同一套请求头和签名。
-- 签名：`hex(HMAC-SHA256(webhook_secret, timestamp + "." + 原始请求体))`。要用原始字节验，不能用重新序列化的 JSON。
-- 5 秒内回 2xx 算送达。失败会在 2 秒、10 秒后各重试一次，之后就只留在信箱。
-- 用 `event_id` 去重，因为重试可能让同一事件到达两次。时间戳和当前时间差超过 5 分钟的，建议拒收。
-
-Python（含测试事件的处理）：
-
-```python
-import hashlib, hmac, json, time
-
-def handle(secret: str | None, headers: dict, raw_body: bytes) -> tuple[int, bytes]:
-    event = json.loads(raw_body)
-    if event.get("type") == "webhook.test":
-        return 200, json.dumps({"challenge": event["challenge"]}).encode()
-    if not secret or not verify(secret, headers, raw_body):
-        return 401, b""
-    # 用 event_id 去重。按 event["type"] 分：
-    #   call.ended   -> 读 event["call"]["transcript"] 去办事
-    #   call.handoff -> 记下 call_id / handoff_id / question，异步去办，办完调 MCP answer_handoff
-    #   call.turn    -> 要纠正助理就回 {"note": "…"}，否则回空
-    return 200, b""
-
-def verify(secret: str, headers: dict, raw_body: bytes) -> bool:
-    ts = headers["X-Phone-Timestamp"]
-    if abs(time.time() - int(ts)) > 300:
-        return False
-    expected = "v1=" + hmac.new(secret.encode(), ts.encode() + b"." + raw_body, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(expected, headers["X-Phone-Signature"])
-```
-
-Node（测试事件同样处理：`type === 'webhook.test'` 时回 `{"challenge": event.challenge}`）：
-
-```js
-import crypto from 'node:crypto';
-
-export function verify(secret, headers, rawBody /* Buffer */) {
-  const ts = headers['x-phone-timestamp'];
-  if (Math.abs(Date.now() / 1000 - Number(ts)) > 300) return false;
-  const expected = 'v1=' + crypto.createHmac('sha256', secret).update(`${ts}.`).update(rawBody).digest('hex');
-  const got = String(headers['x-phone-signature'] ?? '');
-  return got.length === expected.length && crypto.timingSafeEqual(Buffer.from(got), Buffer.from(expected));
-}
-```
+  主人打断了助理时，转写里只保留他实际听到的那部分。
+- 有转交的通话，记录里还有 `handoffs`：每条的问题、状态和答案。
 
 ## 配置（set_context）
 
-电话随时可能打进来，响铃那一两秒里来不及问你。所以助理每通电话只能用你**事先**配好的东西。
-每个字段都可选，只改你传了的字段，其他保持不变。字符串传空串表示清空，`llm` 传 `null` 表示清空。改完下一通电话生效。
+电话随时可能打进来，响铃那一两秒里来不及问你。所以助理每通电话用的都是你**事先**配好的东西。
+每个字段都可选，只改你传了的字段，其他保持不变。字符串传空串表示清空，`llm`、`tools` 传 `null` 表示清空。改完下一通电话生效。
 
-| 字段 | 上限 | 作用 |
-|---|---|---|
-| `owner_name` | 20 字 | 助理怎么称呼主人，例如 `马康`、`王总`。不设就称「机主」 |
-| `agent_name` | 20 字 | 助理的名字，默认「助理」 |
-| `owner_agent_name` | 20 字 | 助理把事情转交给你时怎么称呼你，例如 `小管家`。不设就叫「<owner_name>的助理」 |
-| `persona` | 4000 字 | 助理是谁、说话风格和行为，例如「说话干脆，不客套」。**不要写任何工具名**：工具由各自的说明告诉助理什么时候用（见下文「分层」） |
-| `greeting` | 100 字 | 主人打进来时的第一句，默认「你好，我是<agent_name>。」。外呼的开场固定是「喂，<owner_name>，我是<agent_name>。」 |
-| `text` | 4000 字 | 常驻背景：主人是谁、偏好、这几天的安排和在忙的事、电话里遇到某类事怎么应对。**每次传都是整段替换**，有变化（比如每天早上）就重写 |
-| `webhook_url` | — | 接收 `call.ended` 的 http(s) 地址。**先过测试（回带 challenge）才生效**，见上文。通过后生成新的签名密钥，在返回的 `webhook_secret` 里只给这一次，请立刻存好；丢了就再设一次（会重新测试，旧密钥随即失效） |
-| `tools` | 8 个 | 你自己的工具，通话中助理可以直接调用，见下文「自定义工具」。需要先设 `webhook_url` |
-| `llm` | — | 用你自己的模型代替我们的：`{"url": "https://…/chat/completions", "api_key": "…", "model": "…", "params": {…}}`，要求 OpenAI 兼容、支持流式。不设就用我们的 |
+| 字段 | 上限 | 作用 | 模式 |
+|---|---|---|---|
+| `owner_name` | 20 字 | 助理怎么称呼主人，例如 `马康`、`王总`。不设就称「机主」 | 都可用 |
+| `agent_name` | 20 字 | 助理的名字，默认「助理」 | 都可用 |
+| `owner_agent_name` | 20 字 | 助理怎么称呼你（主人的 Agent），例如 `小管家`。不设就叫「<owner_name>的助理」。助理转交、说「记下了」时都用这个名字 | 都可用 |
+| `persona` | 4000 字 | 助理是谁、说话风格和行为，例如「说话干脆，不客套」。**不要写任何工具名**：工具由各自的说明告诉助理什么时候用（见「分层」） | 都可用 |
+| `greeting` | 100 字 | 主人打进来时的第一句，默认「你好，我是<agent_name>。」。外呼的开场固定是「喂，<owner_name>，我是<agent_name>。」 | 都可用 |
+| `text` | 4000 字 | 常驻背景：主人是谁、偏好、这几天的安排和在忙的事、遇到某类事怎么应对。**每次传都是整段替换**，有变化（比如每天早上）就重写 | 都可用 |
+| `llm` | — | 用你自己的模型代替我们的：`{"url": "https://…/chat/completions", "api_key": "…", "model": "…", "params": {…}}`，要求 OpenAI 兼容、支持流式和 tool calling。不设就用我们的 | 都可用 |
+| `webhook_url` | — | 你的接收端地址。设了就进入 copilot 模式；**先过测试才生效**，见「copilot 模式」 | 开启 copilot |
+| `tools` | 8 个 | 你自己的工具，通话中助理直接调用，见「call.tool」。必须先有 `webhook_url` | copilot |
 
-第一次配置的例子：
+基础模式的第一次配置：
 
 ```json
-{"owner_name": "马康", "agent_name": "小泽", "persona": "说话干脆，口语化。",
- "text": "马康是技术支持工程师，在上海。这周三下午 3 点有项目评审会。",
- "webhook_url": "https://agent.example.com/phone/hook"}
+{"owner_name": "马康", "agent_name": "小泽", "owner_agent_name": "小管家", "persona": "说话干脆，口语化。",
+ "text": "马康是技术支持工程师，在上海。这周三下午 3 点有项目评审会。"}
 ```
 
-- 主人在电话里交代的事：有 webhook 时实时转给你（见下一节）；没有时助理回答「记下了」，事情写在转写里，靠你事后去办。
+基础模式下，`text` 就是助理能知道的全部，要写得更全一些，并且每天更新。
 
-## 通话中参与（webhook）
+## 基础模式：通话后拿结果
 
-设了 `webhook_url` 以后，除了挂断时的 `call.ended`，通话进行中还会收到两种事件。签名、请求头和 `call.ended` 一样，`X-Phone-Event` 写的是事件类型。
-事件里的 `call_id` 就是这通电话的记录 id，可以直接用来调 `get_call`、`update_call`、`answer_handoff`。
+在需要时，或者在你自己的定时任务里，调 `list_calls` 看有没有新电话，再用 `get_call` 取转写。
+呼入的电话也在这里，服务不会主动叫醒你，所以建议定时拉，比如每 10–30 分钟一次，或者每天早上。
+
+读转写时重点找两类内容：
+1. 主人在电话里交代要办的事。助理答应过「挂断后会交给你处理」，主人会默认你在办。
+2. 主人更正过的信息（比如「会议改到四点了」）。更新到你的记忆里，必要时改 `set_context` 的 `text`。
+
+## copilot 模式
+
+### 开启：先部署接收端，再设 webhook_url
+
+1. 部署一个 HTTPS 接口，能处理下面的事件。最低要求是能回 `webhook.test` 的 challenge。
+2. 调 `set_context {"webhook_url": "https://…"}`。服务端会立刻往这个地址发一条测试事件：
+
+   ```json
+   {"type": "webhook.test", "event_id": "evt_…", "created_at": "…", "challenge": "Xk3…"}
+   ```
+
+   你的接口要在 **5 秒内**回 2xx，并且**响应体里原样带回 `challenge`**，例如 `{"challenge": "Xk3…"}`。
+   这时你还没拿到签名密钥，所以测试事件不用验签。
+3. 测试不通过时返回 `error: webhook test failed …; nothing was changed`，这次调用的**所有字段都不生效**。
+   测试通过后，返回里带 `webhook_secret`，**只给这一次**，立刻存好。之后所有事件都用它签名。
+   丢了就再设一次 `webhook_url`：会重新测试，旧密钥随即失效。
+4. 要用自定义工具的，再设 `tools`（可以和 `webhook_url` 放在同一次调用里）。
+
+### 事件一览
+
+所有事件都是 `POST <webhook_url>`，`Content-Type: application/json`，请求头带签名，`X-Phone-Event` 是事件类型。
+所有通话中事件里的 `call_id` 就是这通电话的记录 id，可以直接用来调 `get_call`、`update_call`、`answer_handoff`。
 外呼和呼入都一样：呼入从接通那一刻就有 `call_id`。
+
+| 事件 | 什么时候 | 等你多久 | 失败重试 | 你要回什么 |
+|---|---|---|---|---|
+| `webhook.test` | 设 `webhook_url` 时 | 5 秒 | 不重试 | `{"challenge": "…"}` |
+| `call.turn` | 每一轮：主人说完、助理答完 | 3 秒 | 不重试，超时丢弃 | 空，或 `{"note": "…"}` |
+| `call.handoff` | 助理把一件事交给你 | 5 秒（只要确认收到） | 2 秒、10 秒后各一次 | 2xx 即可，办完另调 `answer_handoff` |
+| `call.tool` | 助理调用你注册的工具 | 5 秒 | 不重试 | `{"result": "…"}` |
+| `call.ended` | 通话结束（含没接通、取消） | 5 秒 | 2 秒、10 秒后各一次 | 2xx 即可 |
+
+**签名**：`X-Phone-Signature: v1=<hex>`，其中 hex 是 `HMAC-SHA256(webhook_secret, X-Phone-Timestamp + "." + 原始请求体)`。
+- 要用原始字节验签，不能先解析再重新序列化。
+- 时间戳和当前时间相差超过 5 分钟的，建议拒收。
+- 用 `event_id` 去重，因为重试可能让同一事件到达两次。
+
+**慢不拖累通话**：`call.turn` 超时就丢弃，`call.tool` 超时助理会说查不到，`call.handoff` 失败助理会说「记下了」。
+你的接口慢或者挂了，主人那边的通话都照常进行。
+
+### call.turn：看着每一轮，必要时纠正
+
+```json
+{"type": "call.turn", "event_id": "evt_…", "created_at": "…", "call_id": "c_…",
+ "caller": "主人这一轮说的话", "agent": "助理这一轮的回答"}
+```
+
+- 不需要介入时，直接回 2xx、空响应体。大多数轮都应该这样。
+- 发现助理说错了、漏了，或者有它该知道的事，就回 `{"note": "一句话说明"}`，助理从下一句开始照着做。
+  - 纠正类的写清楚哪里错、正确的是什么，例如「更正：会议是四点不是三点，下次开口先跟他说一声」。
+  - 补充类的直接写事实，例如「他明天的航班已改签到下午 3 点」。
+- 3 秒内回不了的（比如要查一下），先回空，想好了再调 `update_call {call_id, note}`。通话还没结束就有效。
+- note 每条最多 500 字，一通电话最多保留最近 20 条，以最新一条为准。
+- `agent` 是助理生成的完整回答；主人中途打断时，他实际听到的可能更短。
 
 ### call.handoff：助理把事情交给你办
 
@@ -256,35 +242,17 @@ export function verify(secret, headers, rawBody /* Buffer */) {
  "recent_turns": [{"who": "caller", "text": "…"}, {"who": "agent", "text": "…"}]}
 ```
 
-- 尽快回 2xx 表示收到，**不要在这个请求里办事**（5 秒超时）。失败会在 2 秒、10 秒后各重试一次；
-  都失败时，助理会告诉主人「没联系上助理，记下了，挂断后处理」。
-- 办完调 `answer_handoff {call_id, handoff_id, text}`。`text` 写结论，助理会用自己的话说给主人听，所以写清楚、别太长。
-- 助理在等结果时可以继续聊别的；结果到了，它会在当前这句说完后插进来转告。
-- 如果你办完时通话已经挂断，`answer_handoff` 返回 `delivered: "next_call"`：答案记在通话记录里（`get_call` 的 `handoffs`），
-  主人**下一次**接通电话（打进来或你打过去）时，助理会先告诉他。等不到下次的，另外发消息或 `place_call`。
+- 先回 2xx 确认收到，**不要在这个请求里办事**。
+- 异步去办，办完调 `answer_handoff {call_id, handoff_id, text}`。`text` 写结论，助理会用自己的话转述，所以写清楚、别太长。
+- 助理等结果时会继续和主人聊别的；结果到了，它在当前这句说完后插进来转告。
+- 你办完时通话已经挂断的，`answer_handoff` 返回 `delivered: "next_call"`：答案记在通话记录里，主人**下一次**接通电话（打进来或你打过去）时助理先告诉他。
+  等不到下次的，另外发消息或 `place_call`。
+- 推送三次都失败时，助理会告诉主人「没联系上，记下了，挂断后处理」。这件事仍在通话记录的 `handoffs` 里，你可以事后补办。
 
-### call.turn：每一轮的对话（copilot）
+### call.tool：你的工具，助理直接用
 
-主人说完、助理回答完，推一条：
-
-```json
-{"type": "call.turn", "event_id": "evt_…", "created_at": "…", "call_id": "c_…",
- "caller": "主人这一轮说的话", "agent": "助理这一轮的回答"}
-```
-
-- 不需要介入时，直接回 2xx、空响应体。
-- 发现助理说错了、漏了，或者有它该知道的事，就在响应体里回 `{"note": "一句话说明"}`，助理从下一句开始照着做。
-  也可以稍后随时调 `update_call {call_id, note}`。note 每条最多 500 字，以最新一条为准。
-- 只等 3 秒、不重试，**超时就丢弃**，不会拖慢通话。所以要在 3 秒内回；来不及判断的，先回空，想好了再用 `update_call`。
-- `agent` 是助理生成的完整回答；主人如果中途打断，他实际听到的可能更短。
-- 每一轮都会推，量比较大。不想当 copilot 的，收到后直接回 2xx 就行。
-
-## 自定义工具（call.tool）
-
-助理内置了联网搜索和转交给你。你还可以把自己的工具注册进来，让助理在通话中**几秒内**直接查到结果，不用转交、不用等你办。
-适合查主人的记忆、日程、待办、订单这类「你那边能马上答上来」的事。
-
-用 `set_context` 设 `tools`（整组替换，传 `null` 或 `[]` 清空）：
+适合「你那边能马上答上来」的事：主人的记忆、日程、待办、订单。比转交快得多，通常一两秒。
+用 `set_context` 设 `tools`（整组替换，传 `null` 或 `[]` 清空，最多 8 个）：
 
 ```json
 {"tools": [{"name": "query_memory",
@@ -294,13 +262,13 @@ export function verify(secret, headers, rawBody /* Buffer */) {
             "read_only": true}]}
 ```
 
-- `name`：字母、数字、下划线，不能叫 `web_search` 或 `ask_owner_agent`。
-- `description` 最重要：助理**只**根据它决定什么时候调用。写清楚这个工具能查什么。
+- `name`：字母、数字、下划线，不能叫 `web_search` 或 `ask_owner_agent`（这两个是内置的）。
+- `description` 最重要：助理**只**根据它决定什么时候调用，写清楚这个工具能查什么。
 - `parameters`：JSON Schema 对象。
-- `read_only`：只读的写 `true`。不是只读（会改东西）的，助理要等这句回答真正播出才调用。
-  因为助理会在主人还没说完时就提前准备回答，提前准备的回答可能被作废。只读工具可以提前调用，所以更快。
+- `read_only`：只读的写 `true`。助理会在主人还没说完时就提前准备回答，提前准备的回答可能被作废。
+  只读工具可以提前调用，所以更快；会改东西的工具，要等这句回答真正播出才调用。
 
-助理调用时，往你的 webhook 推一条（签名同上）：
+助理调用时推送：
 
 ```json
 {"type": "call.tool", "event_id": "evt_…", "created_at": "…", "call_id": "c_…", "tool_call_id": "call_…",
@@ -311,16 +279,105 @@ export function verify(secret, headers, rawBody /* Buffer */) {
 - 超时、出错或不是 JSON 时，助理会如实说现在查不到。
 - 同一句话可能调用两次（一次是提前准备的回答，一次是最终播出的回答）。只读工具不受影响。
 
+### call.ended：通话结束
+
+```json
+{"type": "call.ended", "event_id": "evt_…", "created_at": "…", "call": { …和 get_call 的返回一样，含 transcript 和 handoffs… }}
+```
+
+没接通（`unanswered`、`missed`）、取消（`cancelled`）、失败（`failed`）也会推。这时适合做通话总结，并且把通话中主人更正过的信息存起来。
+
+### 三种介入方式怎么选
+
+| 情况 | 用什么 | 主人感受到的延迟 |
+|---|---|---|
+| 你一秒内就能确定助理哪里说错了，或者它该知道一件事 | `call.turn` 回 note | 下一句就改 |
+| 要查一下才知道，但查询本身很快（≤5 秒，只读） | 注册成 `tools` | 一两秒，当场答上 |
+| 要动手办、要花几十秒以上、要用到你那边的复杂能力 | 让助理转交（`call.handoff`），办完 `answer_handoff` | 先说「我去问一下」，办完插进来说 |
+| 想到得晚、不在 3 秒窗口里 | `update_call` | 下一句就改 |
+
+### 接收端示例（Python 标准库）
+
+```python
+import hashlib, hmac, json, threading, time, urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+MCP_URL, MCP_KEY = "https://phone.alexmk.cn/mcp", "pk_…"
+SECRET = ""          # set_context 返回的 webhook_secret，存进你的 secret store
+seen = set()
+
+def mcp(name, args):
+    body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": args}}
+    req = urllib.request.Request(MCP_URL, data=json.dumps(body).encode(), method="POST",
+                                 headers={"Authorization": f"Bearer {MCP_KEY}", "Content-Type": "application/json"})
+    return json.load(urllib.request.urlopen(req, timeout=15))["result"]["content"][0]["text"]
+
+def verify(headers, raw):
+    ts = headers.get("X-Phone-Timestamp", "0")
+    if not SECRET or abs(time.time() - int(ts)) > 300:
+        return False
+    expected = "v1=" + hmac.new(SECRET.encode(), ts.encode() + b"." + raw, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, headers.get("X-Phone-Signature", ""))
+
+def work_on(event):                       # 在后台办事，办完回给电话
+    answer = "…你的 Agent 办事的结论…"
+    mcp("answer_handoff", {"call_id": event["call_id"], "handoff_id": event["handoff_id"], "text": answer})
+
+class Hook(BaseHTTPRequestHandler):
+    def reply(self, status, payload=None):
+        data = json.dumps(payload, ensure_ascii=False).encode() if payload is not None else b""
+        self.send_response(status); self.send_header("Content-Length", str(len(data))); self.end_headers()
+        self.wfile.write(data)
+
+    def do_POST(self):
+        raw = self.rfile.read(int(self.headers["Content-Length"]))
+        event = json.loads(raw)
+        if event.get("type") == "webhook.test":
+            return self.reply(200, {"challenge": event["challenge"]})
+        if not verify(self.headers, raw):
+            return self.reply(401)
+        if event["event_id"] in seen:
+            return self.reply(200)
+        seen.add(event["event_id"])
+        kind = event["type"]
+        if kind == "call.turn":              # 3 秒内：要纠正就回 note，否则回空
+            return self.reply(200, {})
+        if kind == "call.tool":              # 5 秒内：回结果
+            return self.reply(200, {"result": f"（{event['name']} 的查询结果）"})
+        if kind == "call.handoff":           # 先确认，再异步办
+            threading.Thread(target=work_on, args=(event,), daemon=True).start()
+            return self.reply(200)
+        if kind == "call.ended":             # 写总结、存主人更正过的信息
+            return self.reply(200)
+        return self.reply(200)
+
+ThreadingHTTPServer(("0.0.0.0", 8080), Hook).serve_forever()
+```
+
+Node 验签：
+
+```js
+import crypto from 'node:crypto';
+
+export function verify(secret, headers, rawBody /* Buffer */) {
+  const ts = headers['x-phone-timestamp'];
+  if (!secret || Math.abs(Date.now() / 1000 - Number(ts)) > 300) return false;
+  const expected = 'v1=' + crypto.createHmac('sha256', secret).update(`${ts}.`).update(rawBody).digest('hex');
+  const got = String(headers['x-phone-signature'] ?? '');
+  return got.length === expected.length && crypto.timingSafeEqual(Buffer.from(got), Buffer.from(expected));
+}
+```
+
 ## 分层：谁管什么
 
 | 层 | 谁负责 | 内容 |
 |---|---|---|
-| 通话规则和内置工具 | 电话服务 | 怎么说话（口语、短句）、联网搜索、转交给你 |
+| 通话规则和内置工具 | 电话服务 | 怎么说话（口语、短句）、联网搜索、转交给你（copilot 模式） |
 | 人设 `persona` | 你 | 助理是谁、什么风格、哪类事该先查什么或交给你。**不写工具名** |
-| 工具 `tools` | 你 | 每个工具的名字和说明。说明决定什么时候用 |
+| 工具 `tools` | 你（copilot 模式） | 每个工具的名字和说明，说明决定什么时候用 |
 | 背景 `text`、通话中 note | 你 | 主人的情况和这几天的事；通话中的补充和纠正 |
 
-人设里写「主人的私事先查记忆」，再注册一个说明为「查关于主人的记忆」的工具，助理就会去调它。
+例如人设里写「主人的私事先查记忆，查不到再交给小管家」，再注册一个说明为「查关于主人的记忆」的工具，助理就会先调它，查不到再转交。
 同一份人设还可以给你自己的其他语音入口用，工具名各自不同也没关系。
 
 ## 限制与常见错误
@@ -332,10 +389,13 @@ export function verify(secret, headers, rawBody /* Buffer */) {
 | `call_id` 不存在或不属于你 | `error: no such call` |
 | key 错误或缺失 | HTTP 401 |
 | 主人没接 | 状态为 `unanswered`，按 `retries` 重拨；用完以后要不要换渠道，由你决定 |
+| webhook 测试不通过 | `error: webhook test failed …; nothing was changed`，整次调用不生效 |
+| 没有 webhook 就设 `tools` | `error: tools are called over the webhook: set webhook_url too` |
 | `update_call` 时通话已经结束 | `error: the call is not in progress` |
 | `handoff_id` 不对 | `error: no such handoff on this call` |
 
 ## 隐私
 
-电话服务只保存通话需要的东西：brief、常驻背景、转写。主人的记忆和其他隐私都留在你这边。
-不要把密码、证件号这类内容写进 brief 或常驻背景。
+电话服务只保存通话需要的东西：brief、配置、转写、转交记录。主人的记忆和其他隐私都留在你这边。
+copilot 模式下，工具结果和转交答案只在这通电话里用于回答，不会另外存储，转交答案会记在通话记录里。
+不要把密码、证件号这类内容写进 brief、常驻背景或工具结果。
