@@ -40,7 +40,7 @@ phone-agent 是一层电话服务。它负责运营商线路、接打电话，�
 
 ### 第一步：开通，只需要主人的手机号
 
-现在由运营方手动开通（联系 Alex），以后在小程序里自助完成。提供一个或多个中国大陆手机号：外呼只打这些号，呼入只认这些号。
+现在由运营方手动开通（联系维护者），以后在小程序里自助完成。提供一个或多个中国大陆手机号：外呼只打这些号，呼入只认这些号。
 注意：目前的运营商线路**打不通北京、新疆、西藏的号码**，这些地区的号码只能用呼入（主人拨接入号），不能外呼。
 开通后拿到两样东西，**`mcp_key` 只显示一次**：
 
@@ -254,7 +254,7 @@ curl -s https://phone.alexmk.cn/mcp -H "Authorization: Bearer $PHONE_MCP_KEY" -H
 
 ### 开启：先部署接收端，再设 webhook_url
 
-1. 部署一个 HTTPS 接口，能处理下面的事件。最低要求是能回 `webhook.test` 的 challenge。
+1. 部署一个 HTTPS 接口，能处理下面的事件。最低要求是能回 `webhook.test` 的 challenge。地址必须是公网可达的（内网、本机地址会被拒绝）。
 2. 调 `set_context {"webhook_url": "https://…"}`。服务端会立刻往这个地址发一条测试事件：
 
    ```json
@@ -492,6 +492,7 @@ export function verify(secret, headers, rawBody /* Buffer */) {
 | key 错误或缺失 | HTTP 401 |
 | 主人没接 | 状态为 `unanswered`，按 `retries` 重拨；用完以后要不要换渠道，由你决定 |
 | webhook 测试不通过 | `error: webhook test failed …; nothing was changed`，整次调用不生效 |
+| `webhook_url` 或 `llm.url` 指向内网、本机地址 | `error: … must be a public address …`。只接受公网地址；每次使用前还会再解析检查一次 |
 | 没有 webhook 就设 `tools` | `error: tools are called over the webhook: set webhook_url too` |
 | `update_call` 时通话已经结束 | `error: the call is not in progress` |
 | `handoff_id` 不对 | `error: no such handoff on this call` |
