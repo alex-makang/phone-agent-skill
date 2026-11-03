@@ -4,6 +4,6 @@
 服务端是 `https://phone.alexmk.cn/mcp`（MCP over HTTP，Bearer 鉴权）。
 
 - 用法、鉴权、工具、webhook 验签：[`phone-agent/SKILL.md`](phone-agent/SKILL.md)
-- 安装：把 `phone-agent/` 目录放进你的 Agent 的 skills 目录（例如 Claude Code 的 `~/.claude/skills/`），再按 SKILL.md 配好 MCP。
+- 安装：把 `phone-agent/` 目录放进你的 Agent 的 skills 目录（例如 Claude Code 的 `~/.claude/skills/`），接上 MCP 后对你的 Agent 说「帮我设置一下电话助理」，它会按 SKILL.md 的「首次设置」带你一步步配好。
 - 接入两步：① 开通，只需要主人的手机号，拿到 MCP key（目前联系维护者手动开通，以后在小程序里自助）；② 接上 MCP，调 `set_context` 配好称呼、助理名字、人设、常驻背景、webhook 和自带 LLM。
 - 两种用法：没有 webhook 是基础模式（通话前配置、通话后读结果）；设了 webhook 就是 copilot 模式（通话中实时接住主人交代的事、纠正助理、给助理提供你自己的工具）。对比表见 SKILL.md 开头。
